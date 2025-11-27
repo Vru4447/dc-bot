@@ -10,7 +10,7 @@ from threading import Thread
 import os
 
 # ⚠️ REMOVE THIS TOKEN AND USE ENVIRONMENT VARIABLE INSTEAD!
-TOKEN = os.environ['MTQzOTk2Nzc3Nzk4NDM0ODI5MA.GQIJ6Q.FPXu9iWNLW09S4CWLunIVn8207Fd5_DrsLs0B4']
+TOKEN = os.environ['DISCORD_BOT_TOKEN']
 # Flask web server for uptime
 app = Flask('')
 
@@ -1127,4 +1127,5 @@ bot.setup_hook = setup_hook
 keep_alive()
 
 # ⚠️ IMPORTANT: Use environment variable for token!
+
 bot.run(TOKEN)
