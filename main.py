@@ -9,9 +9,15 @@ from flask import Flask
 from threading import Thread
 import os
 
-# ⚠️ REMOVE THIS TOKEN AND USE ENVIRONMENT VARIABLE INSTEAD!
+# Token handling for Replit
 TOKEN = os.environ['BOTTOKEN']
-# Flask web server for uptime
+
+if not TOKEN:
+    print("❌ ERROR: DISCORD_BOT_TOKEN not found in environment variables!")
+    print("💡 Please add DISCORD_BOT_TOKEN to your Replit Secrets")
+    exit(1)
+
+# Flask web server for uptime (keep this for Replit too)
 app = Flask('')
 
 @app.route('/')
@@ -25,6 +31,9 @@ def keep_alive():
     server = Thread(target=run)
     server.start()
 
+# Start the web server (important for Replit to keep bot alive)
+keep_alive()
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -37,6 +46,10 @@ bot.remove_command("help")
 # ---------------------------------------------------------
 LOG_CHANNEL_ID = 1418106413640581191
 
+# ROLE IDS FOR COMMAND ACCESS
+FULL_ADMIN_ROLE_IDS = [1417941498028101765, 1402332135536197773, 1376250853870010479]  # Full access to everything
+TICKET_ADMIN_ROLE_IDS = FULL_ADMIN_ROLE_IDS + [1420001481322401893]  # Full admins + ticket admin
+GIVEAWAY_ROLE_IDS = FULL_ADMIN_ROLE_IDS + [1435640529525149837]  # Full admins + giveaway role
 
 # ---------------------------------------------------------
 
@@ -61,20 +74,74 @@ def parse_duration_to_seconds(s: str):
         return val * 86400
     return None
 
+# ---------------------------
+# Permission Check Functions
+# ---------------------------
+def has_full_admin_access():
+    async def predicate(ctx):
+        if ctx.author.guild_permissions.administrator:
+            return True
+        user_roles = [role.id for role in ctx.author.roles]
+        return any(role_id in user_roles for role_id in FULL_ADMIN_ROLE_IDS)
+    return commands.check(predicate)
+
+def has_ticket_admin_access():
+    async def predicate(ctx):
+        if ctx.author.guild_permissions.administrator:
+            return True
+        user_roles = [role.id for role in ctx.author.roles]
+        return any(role_id in user_roles for role_id in TICKET_ADMIN_ROLE_IDS)
+    return commands.check(predicate)
+
+def has_giveaway_access():
+    async def predicate(ctx):
+        if ctx.author.guild_permissions.administrator:
+            return True
+        user_roles = [role.id for role in ctx.author.roles]
+        return any(role_id in user_roles for role_id in GIVEAWAY_ROLE_IDS)
+    return commands.check(predicate)
+
+def has_moderation_access():
+    async def predicate(ctx):
+        if ctx.author.guild_permissions.administrator:
+            return True
+        user_roles = [role.id for role in ctx.author.roles]
+        return any(role_id in user_roles for role_id in FULL_ADMIN_ROLE_IDS)
+    return commands.check(predicate)
 
 # ---------------------------
-# Ready event
+# Ready event with proper command syncing
 # ---------------------------
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
+    print(f"✅ Bot is ready! Logged in as {bot.user}")
+
+    # Sync slash commands with better error handling
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Successfully synced {len(synced)} slash command(s)")
+
+        # Print all synced commands for debugging
+        for command in synced:
+            print(f"  - /{command.name}")
+
+    except Exception as e:
+        print(f"❌ Failed to sync slash commands: {e}")
+
+    # Add ticket system cog
+    try:
+        await bot.add_cog(TicketSystem(bot))
+        print("✅ TicketSystem cog loaded")
+    except Exception as e:
+        print(f"❌ Failed to load TicketSystem cog: {e}")
+
+    # Send ready message to log channel
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
     if log_channel:
         try:
             await log_channel.send("✅ **Bot is now Ready!** 😎")
         except Exception as e:
-            print(f"Failed to send ready message to log channel: {e}")
-
+            print(f"Note: Couldn't send ready message to log channel: {e}")
 
 # ---------------------------
 # Small helper to send logs
@@ -91,14 +158,11 @@ async def send_log(content: str, file: discord.File = None):
     except Exception as e:
         print(f"Failed to send log: {e}")
 
-
 # ============================================================
 #                       GIVEAWAY SYSTEM
 # ============================================================
 active_giveaways = {}
 giveaway_id_counter = 1
-ALLOWED_ROLES = ["Owner", "moderator", "giveaway host", "staff", "manager"]
-
 
 def parse_duration(duration: str) -> int:
     """Parse duration string to seconds"""
@@ -134,7 +198,6 @@ def parse_duration(duration: str) -> int:
             total_seconds += num * 60
 
     return total_seconds if total_seconds > 0 else 0
-
 
 async def end_giveaway(giveaway_id: int):
     """End a giveaway and pick winners"""
@@ -234,210 +297,113 @@ async def end_giveaway(giveaway_id: int):
     except Exception as e:
         print(f"Error ending giveaway {giveaway_id}: {e}")
 
+# SLASH COMMAND FOR GIVEAWAY CREATE
+@bot.tree.command(name="giveaway_create", description="Create a new giveaway")
+async def giveaway_create(interaction: discord.Interaction, prize: str, duration: str, winners: int, host: discord.Member = None):
+    """Create a giveaway using slash command"""
+    # Check permissions
+    user_roles = [role.id for role in interaction.user.roles]
+    has_access = any(role_id in user_roles for role_id in GIVEAWAY_ROLE_IDS) or interaction.user.guild_permissions.administrator
 
-@bot.command(name='gwcreate')
-async def gwcreate(ctx, *, args: str = None):
-    """Create a giveaway"""
-    has_permission = False
-    for role in ctx.author.roles:
-        if role.name.lower() in [r.lower() for r in ALLOWED_ROLES]:
-            has_permission = True
-            break
-
-    if not has_permission and not ctx.author.guild_permissions.administrator:
-        role_names = ", ".join(ALLOWED_ROLES)
-        await ctx.send(f"❌ You don't have permission to use this command!\n**Required roles:** {role_names}")
+    if not has_access:
+        await interaction.response.send_message("❌ You don't have permission to create giveaways!", ephemeral=True)
         return
 
-    if args is None:
-        await ctx.send(
-            '❌ Usage: `,,gwcreate "Prize Name" duration winners host(@user)`\nExample: `,,gwcreate "100 ROBUX" 10m 1 host(@user)`')
+    if host is None:
+        host = interaction.user
+
+    if winners < 1:
+        await interaction.response.send_message("❌ Winners must be at least 1!", ephemeral=True)
         return
 
-    try:
-        parts = args.split()
-        if len(parts) < 2:
-            await ctx.send(
-                '❌ Usage: `,,gwcreate "Prize Name" duration winners host(@user)`\nExample: `,,gwcreate "100 ROBUX" 10m 1 host(@user)`')
-            return
-
-        prize = ""
-        duration = ""
-        winners = 1
-        host = ctx.author
-
-        if args.startswith('"'):
-            end_quote_index = args.find('"', 1)
-            if end_quote_index == -1:
-                await ctx.send("❌ Invalid format! Make sure to close the quotes around the prize name.")
-                return
-            prize = args[1:end_quote_index]
-            remaining_args = args[end_quote_index + 1:].strip()
-        else:
-            first_space = args.find(' ')
-            if first_space == -1:
-                await ctx.send("❌ Please provide a duration!")
-                return
-            prize = args[:first_space]
-            remaining_args = args[first_space + 1:].strip()
-
-        host_match = re.search(r'host\s*\(<@!?(\d+)>\)', remaining_args, re.IGNORECASE)
-        if host_match:
-            host_id = int(host_match.group(1))
-            try:
-                host = await bot.fetch_user(host_id)
-                remaining_args = re.sub(r'host\s*\(<@!?\d+>\)', '', remaining_args, flags=re.IGNORECASE).strip()
-            except:
-                await ctx.send("❌ Invalid user mentioned for host!")
-                return
-
-        remaining_parts = remaining_args.split()
-        if remaining_parts:
-            duration = remaining_parts[0]
-            if len(remaining_parts) > 1:
-                try:
-                    winners = int(remaining_parts[1])
-                except ValueError:
-                    if 'host' in remaining_parts[1].lower():
-                        await ctx.send("❌ Invalid host format! Use `host(@user)`")
-                        return
-                    await ctx.send("❌ Winners must be a number!")
-                    return
-
-        if not prize:
-            await ctx.send("❌ Please provide a prize name!")
-            return
-        if not duration:
-            await ctx.send("❌ Please provide a duration!")
-            return
-        if winners < 1:
-            await ctx.send("❌ Winners must be at least 1!")
-            return
-
-        duration_seconds = parse_duration(duration)
-        if duration_seconds <= 0:
-            await ctx.send("❌ Please provide a valid duration (e.g., 1h, 30m, 1d, 10s)")
-            return
-
-        end_time = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
-        global giveaway_id_counter
-        giveaway_id = giveaway_id_counter
-        giveaway_id_counter += 1
-
-        embed = discord.Embed(
-            title=f"🎉 **{prize}** 🎉",
-            description=f"**Winners:** {winners}\n"
-                        f"**Ends:** <t:{int(end_time.timestamp())}:R> (<t:{int(end_time.timestamp())}:F>)\n"
-                        f"**Hosted by:** {host.mention}\n\n"
-                        f"Click the 🎉 button to enter!",
-            color=0x00ff00,
-            timestamp=end_time)
-        embed.set_footer(text=f"Giveaway ID: {giveaway_id} | Ends at")
-
-        image_url = None
-        if ctx.message.attachments:
-            for attachment in ctx.message.attachments:
-                if attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
-                    image_url = attachment.url
-                    embed.set_image(url=image_url)
-                    break
-
-        giveaway_msg = await ctx.send(embed=embed)
-        await giveaway_msg.add_reaction("🎉")
-
-        active_giveaways[giveaway_id] = {
-            'message_id': giveaway_msg.id,
-            'channel_id': ctx.channel.id,
-            'prize': prize,
-            'winners': winners,
-            'end_time': end_time,
-            'host_id': host.id,
-            'participants': [],
-            'ended': False,
-            'image_url': image_url
-        }
-
-        success_msg = f"✅ Giveaway created successfully! ID: `{giveaway_id}`\n**Host:** {host.mention}"
-        if image_url:
-            success_msg += "\n**Image attached:** ✅"
-
-        log_channel = bot.get_channel(LOG_CHANNEL_ID)
-        if log_channel:
-            log_embed = discord.Embed(
-                title="🎉 Giveaway Created",
-                description=f"**Prize:** {prize}\n"
-                            f"**Winners:** {winners}\n"
-                            f"**Duration:** {duration}\n"
-                            f"**Ends:** <t:{int(end_time.timestamp())}:F>\n"
-                            f"**Host:** {host.mention}\n"
-                            f"**Created by:** {ctx.author.mention}\n"
-                            f"**Channel:** {ctx.channel.mention}\n"
-                            f"**Giveaway ID:** {giveaway_id}",
-                color=0x00ff00,
-                timestamp=datetime.now(timezone.utc))
-            if image_url:
-                log_embed.set_image(url=image_url)
-            await log_channel.send(embed=log_embed)
-
-        await ctx.send(success_msg)
-        await asyncio.sleep(duration_seconds)
-        await end_giveaway(giveaway_id)
-
-    except Exception as e:
-        await ctx.send(f"❌ Error creating giveaway: {str(e)}")
-
-
-@bot.command(name='gwend')
-async def gwend(ctx, giveaway_id: int = None):
-    """End a giveaway early"""
-    has_permission = False
-    for role in ctx.author.roles:
-        if role.name.lower() in [r.lower() for r in ALLOWED_ROLES]:
-            has_permission = True
-            break
-
-    if not has_permission and not ctx.author.guild_permissions.administrator:
-        role_names = ", ".join(ALLOWED_ROLES)
-        await ctx.send(f"❌ You don't have permission to use this command!\n**Required roles:** {role_names}")
+    duration_seconds = parse_duration(duration)
+    if duration_seconds <= 0:
+        await interaction.response.send_message("❌ Please provide a valid duration (e.g., 1h, 30m, 1d, 10s)", ephemeral=True)
         return
 
-    if giveaway_id is None:
-        await ctx.send("❌ Please provide a giveaway ID. Use `,,gwlist` to see active giveaways.")
-        return
+    end_time = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
+    global giveaway_id_counter
+    giveaway_id = giveaway_id_counter
+    giveaway_id_counter += 1
 
-    if giveaway_id not in active_giveaways:
-        await ctx.send("❌ Giveaway not found or already ended.")
-        return
+    embed = discord.Embed(
+        title=f"🎉 **{prize}** 🎉",
+        description=f"**Winners:** {winners}\n"
+                    f"**Ends:** <t:{int(end_time.timestamp())}:R> (<t:{int(end_time.timestamp())}:F>)\n"
+                    f"**Hosted by:** {host.mention}\n\n"
+                    f"Click the 🎉 button to enter!",
+        color=0x00ff00,
+        timestamp=end_time)
+    embed.set_footer(text=f"Giveaway ID: {giveaway_id} | Ends at")
 
-    giveaway = active_giveaways[giveaway_id]
-    if giveaway['host_id'] != ctx.author.id and not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ You can only end giveaways that you hosted!")
-        return
+    await interaction.response.send_message(embed=embed)
+    giveaway_msg = await interaction.original_response()
+    await giveaway_msg.add_reaction("🎉")
 
-    await end_giveaway(giveaway_id)
+    active_giveaways[giveaway_id] = {
+        'message_id': giveaway_msg.id,
+        'channel_id': interaction.channel.id,
+        'prize': prize,
+        'winners': winners,
+        'end_time': end_time,
+        'host_id': host.id,
+        'participants': [],
+        'ended': False,
+        'image_url': None
+    }
+
+    success_msg = f"✅ Giveaway created successfully! ID: `{giveaway_id}`\n**Host:** {host.mention}"
+    await interaction.followup.send(success_msg, ephemeral=True)
+
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
     if log_channel:
         log_embed = discord.Embed(
-            title="🎉 Giveaway Ended Manually",
-            description=f"**Prize:** {giveaway['prize']}\n"
-                        f"**Host:** <@{giveaway['host_id']}>\n"
-                        f"**Giveaway ID:** {giveaway_id}\n"
-                        f"**Ended by:** {ctx.author.mention}\n"
-                        f"⏰ **Ended early** by command",
-            color=0xffa500,
+            title="🎉 Giveaway Created",
+            description=f"**Prize:** {prize}\n"
+                        f"**Winners:** {winners}\n"
+                        f"**Duration:** {duration}\n"
+                        f"**Ends:** <t:{int(end_time.timestamp())}:F>\n"
+                        f"**Host:** {host.mention}\n"
+                        f"**Created by:** {interaction.user.mention}\n"
+                        f"**Channel:** {interaction.channel.mention}\n"
+                        f"**Giveaway ID:** {giveaway_id}",
+            color=0x00ff00,
             timestamp=datetime.now(timezone.utc))
-        if giveaway.get('image_url'):
-            log_embed.set_image(url=giveaway['image_url'])
         await log_channel.send(embed=log_embed)
 
-    await ctx.send(f"✅ Giveaway `{giveaway_id}` ended successfully!")
+    await asyncio.sleep(duration_seconds)
+    await end_giveaway(giveaway_id)
 
+# SLASH COMMAND FOR GIVEAWAY END
+@bot.tree.command(name="giveaway_end", description="End a giveaway early")
+async def giveaway_end(interaction: discord.Interaction, giveaway_id: int):
+    """End a giveaway early using slash command"""
+    # Check permissions
+    user_roles = [role.id for role in interaction.user.roles]
+    has_access = any(role_id in user_roles for role_id in GIVEAWAY_ROLE_IDS) or interaction.user.guild_permissions.administrator
 
-@bot.command(name='gwlist')
-async def gwlist(ctx):
-    """List all active giveaways"""
+    if not has_access:
+        await interaction.response.send_message("❌ You don't have permission to end giveaways!", ephemeral=True)
+        return
+
+    if giveaway_id not in active_giveaways:
+        await interaction.response.send_message("❌ Giveaway not found or already ended.", ephemeral=True)
+        return
+
+    giveaway = active_giveaways[giveaway_id]
+    if giveaway['host_id'] != interaction.user.id and not any(role_id in [role.id for role in interaction.user.roles] for role_id in FULL_ADMIN_ROLE_IDS):
+        await interaction.response.send_message("❌ You can only end giveaways that you hosted!", ephemeral=True)
+        return
+
+    await end_giveaway(giveaway_id)
+    await interaction.response.send_message(f"✅ Giveaway `{giveaway_id}` ended successfully!")
+
+# SLASH COMMAND FOR GIVEAWAY LIST
+@bot.tree.command(name="giveaway_list", description="List all active giveaways")
+async def giveaway_list(interaction: discord.Interaction):
+    """List all active giveaways using slash command"""
     if not active_giveaways:
-        await ctx.send("📝 No active giveaways!")
+        await interaction.response.send_message("📝 No active giveaways!")
         return
 
     embed = discord.Embed(title="🎉 Active Giveaways", color=0x00ff00)
@@ -450,139 +416,320 @@ async def gwlist(ctx):
                 name=f"ID: {giveaway_id} - {giveaway['prize']}",
                 value=f"Winners: {giveaway['winners']} | Ends in: {hours}h {minutes}m\nHosted by: <@{giveaway['host_id']}>",
                 inline=False)
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
+# SLASH COMMAND FOR GIVEAWAY REROLL
+@bot.tree.command(name="giveaway_reroll", description="Reroll winners for an ended giveaway")
+async def giveaway_reroll(interaction: discord.Interaction, giveaway_id: int, winners: int = 1):
+    """Reroll winners using slash command"""
+    # Check permissions
+    user_roles = [role.id for role in interaction.user.roles]
+    has_access = any(role_id in user_roles for role_id in GIVEAWAY_ROLE_IDS) or interaction.user.guild_permissions.administrator
 
-@bot.command(name='gwreroll')
-async def gwreroll(ctx, giveaway_id: int, winners: int = 1):
-    """Reroll winners for an ended giveaway"""
-    has_permission = False
-    for role in ctx.author.roles:
-        if role.name.lower() in [r.lower() for r in ALLOWED_ROLES]:
-            has_permission = True
-            break
-
-    if not has_permission and not ctx.author.guild_permissions.administrator:
-        role_names = ", ".join(ALLOWED_ROLES)
-        await ctx.send(f"❌ You don't have permission to use this command!\n**Required roles:** {role_names}")
+    if not has_access:
+        await interaction.response.send_message("❌ You don't have permission to reroll giveaways!", ephemeral=True)
         return
 
     if giveaway_id not in active_giveaways:
-        await ctx.send("❌ Giveaway not found!")
+        await interaction.response.send_message("❌ Giveaway not found!", ephemeral=True)
         return
 
     giveaway = active_giveaways[giveaway_id]
     if not giveaway['ended']:
-        await ctx.send("❌ Giveaway hasn't ended yet!")
+        await interaction.response.send_message("❌ Giveaway hasn't ended yet!", ephemeral=True)
         return
 
     if not giveaway['participants']:
-        await ctx.send("❌ No participants to reroll from!")
+        await interaction.response.send_message("❌ No participants to reroll from!", ephemeral=True)
         return
 
     winners_count = min(len(giveaway['participants']), winners)
     new_winners = random.sample(giveaway['participants'], winners_count)
     winners_mentions = ', '.join([f"<@{winner_id}>" for winner_id in new_winners])
 
-    log_channel = bot.get_channel(LOG_CHANNEL_ID)
-    if log_channel:
-        log_embed = discord.Embed(
-            title="🎉 Giveaway Winners Rerolled",
-            description=f"**Prize:** {giveaway['prize']}\n"
-                        f"**Host:** <@{giveaway['host_id']}>\n"
-                        f"**Giveaway ID:** {giveaway_id}\n"
-                        f"**Rerolled by:** {ctx.author.mention}\n"
-                        f"**New Winners:** {winners_mentions}",
-            color=0xffff00,
-            timestamp=datetime.now(timezone.utc))
-        if giveaway.get('image_url'):
-            log_embed.set_image(url=giveaway['image_url'])
-        await log_channel.send(embed=log_embed)
-
-    await ctx.send(
+    await interaction.response.send_message(
         f"🎉 **Rerolled Winners for** `{giveaway['prize']}`\n\nNew winners: {winners_mentions}\n**Host:** <@{giveaway['host_id']}>")
 
+# ============================================================
+#                    MODERATION SLASH COMMANDS
+# ============================================================
 
-@bot.command(name='gwsethost')
-async def gwsethost(ctx, giveaway_id: int, new_host: discord.Member):
-    """Change the host of a giveaway"""
-    has_permission = False
-    for role in ctx.author.roles:
-        if role.name.lower() in [r.lower() for r in ALLOWED_ROLES]:
-            has_permission = True
-            break
+# SLASH COMMAND - TIMEOUT
+@bot.tree.command(name="timeout", description="Timeout a user")
+async def timeout_slash(interaction: discord.Interaction, user: discord.Member, duration: str, reason: str = None):
+    """Timeout a user using slash command"""
+    # Check permissions
+    user_roles = [role.id for role in interaction.user.roles]
+    has_access = any(role_id in user_roles for role_id in FULL_ADMIN_ROLE_IDS) or interaction.user.guild_permissions.administrator
 
-    if not has_permission and not ctx.author.guild_permissions.administrator:
-        role_names = ", ".join(ALLOWED_ROLES)
-        await ctx.send(f"❌ You don't have permission to use this command!\n**Required roles:** {role_names}")
+    if not has_access:
+        await interaction.response.send_message("❌ You don't have permission to timeout users!", ephemeral=True)
         return
 
-    if giveaway_id not in active_giveaways:
-        await ctx.send("❌ Giveaway not found!")
+    seconds = parse_duration_to_seconds(duration)
+    if seconds is None:
+        await interaction.response.send_message("❌ Invalid duration format. Use examples: 30s, 10m, 2h, 1d", ephemeral=True)
         return
 
-    giveaway = active_giveaways[giveaway_id]
-    if giveaway['host_id'] != ctx.author.id and not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ You can only change host for giveaways that you currently host!")
-        return
-
-    old_host_id = giveaway['host_id']
-    giveaway['host_id'] = new_host.id
+    until = datetime.now(timezone.utc) + timedelta(seconds=seconds)
 
     try:
-        channel = bot.get_channel(giveaway['channel_id'])
-        if channel:
-            message = await channel.fetch_message(giveaway['message_id'])
-            embed = message.embeds[0]
-            embed.description = re.sub(r'\*\*Hosted by:\*\* <@!?\d+>', f'**Hosted by:** {new_host.mention}',
-                                       embed.description)
-            await message.edit(embed=embed)
-    except:
-        pass
+        await user.edit(timed_out_until=until)
+        await interaction.response.send_message(f"⏳ {user.mention} timed out for {duration}.")
+        await send_log(f"⏳ **Timeout** {user.mention} by {interaction.user.mention} for {duration} — Reason: {reason}")
+    except Exception as e:
+        await interaction.response.send_message("❌ Could not apply timeout (bot missing permission or role hierarchy).", ephemeral=True)
 
-    log_channel = bot.get_channel(LOG_CHANNEL_ID)
-    if log_channel:
-        log_embed = discord.Embed(
-            title="🎉 Giveaway Host Changed",
-            description=f"**Prize:** {giveaway['prize']}\n"
-                        f"**Giveaway ID:** {giveaway_id}\n"
-                        f"**Changed by:** {ctx.author.mention}\n"
-                        f"**Old Host:** <@{old_host_id}>\n"
-                        f"**New Host:** {new_host.mention}",
-            color=0x00ffff,
-            timestamp=datetime.now(timezone.utc))
-        if giveaway.get('image_url'):
-            log_embed.set_image(url=giveaway['image_url'])
-        await log_channel.send(embed=log_embed)
+# SLASH COMMAND - BAN
+@bot.tree.command(name="ban", description="Ban a user from the server")
+async def ban_slash(interaction: discord.Interaction, user: discord.Member, reason: str = None):
+    """Ban a user using slash command"""
+    # Check permissions
+    user_roles = [role.id for role in interaction.user.roles]
+    has_access = any(role_id in user_roles for role_id in FULL_ADMIN_ROLE_IDS) or interaction.user.guild_permissions.administrator
 
-    await ctx.send(f"✅ Host changed from <@{old_host_id}> to {new_host.mention} for giveaway `{giveaway_id}`")
-
-
-@bot.event
-async def on_raw_reaction_add(payload):
-    """Handle reaction adds for giveaways"""
-    if payload.user_id == bot.user.id:
+    if not has_access:
+        await interaction.response.send_message("❌ You don't have permission to ban users!", ephemeral=True)
         return
 
-    for giveaway_id, giveaway in active_giveaways.items():
-        if (payload.message_id == giveaway['message_id'] and
-                str(payload.emoji) == "🎉" and
-                not giveaway['ended']):
-            if payload.user_id not in giveaway['participants']:
-                giveaway['participants'].append(payload.user_id)
+    try:
+        await interaction.guild.ban(user, reason=reason)
+        await interaction.response.send_message(f"🔨 Banned {user.mention}.")
+        await send_log(f"🔨 **Banned** {user.mention} by {interaction.user.mention} — Reason: {reason}")
+    except Exception as e:
+        await interaction.response.send_message("❌ Could not ban that member (missing permissions / role hierarchy).", ephemeral=True)
 
+# SLASH COMMAND - KICK
+@bot.tree.command(name="kick", description="Kick a user from the server")
+async def kick_slash(interaction: discord.Interaction, user: discord.Member, reason: str = None):
+    """Kick a user using slash command"""
+    # Check permissions
+    user_roles = [role.id for role in interaction.user.roles]
+    has_access = any(role_id in user_roles for role_id in FULL_ADMIN_ROLE_IDS) or interaction.user.guild_permissions.administrator
+
+    if not has_access:
+        await interaction.response.send_message("❌ You don't have permission to kick users!", ephemeral=True)
+        return
+
+    try:
+        await interaction.guild.kick(user, reason=reason)
+        await interaction.response.send_message(f"⛔ Kicked {user.mention}.")
+        await send_log(f"⛔ **Kicked** {user.mention} by {interaction.user.mention} — Reason: {reason}")
+    except Exception as e:
+        await interaction.response.send_message("❌ Could not kick that member (missing permissions / role hierarchy).", ephemeral=True)
+
+# SLASH COMMAND - GIVE ROLE
+@bot.tree.command(name="give_role", description="Give roles to a user")
+async def give_role_slash(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
+    """Give role to user using slash command"""
+    # Check permissions
+    user_roles = [role.id for role in interaction.user.roles]
+    has_access = any(role_id in user_roles for role_id in FULL_ADMIN_ROLE_IDS) or interaction.user.guild_permissions.administrator
+
+    if not has_access:
+        await interaction.response.send_message("❌ You don't have permission to give roles!", ephemeral=True)
+        return
+
+    try:
+        await user.add_roles(role)
+        await interaction.response.send_message(f"✅ **Role Added!**\n👤 User: {user.mention}\n🎭 Role: {role.name}")
+        await send_log(f"🛠️ **Role Added**\nAdmin: {interaction.user.mention}\nUser: {user.mention}\nRole: {role.name}")
+    except Exception:
+        await interaction.response.send_message("❌ Could not add role (check bot permissions and role hierarchy).", ephemeral=True)
+
+# SLASH COMMAND - REMOVE ROLE
+@bot.tree.command(name="remove_role", description="Remove roles from a user")
+async def remove_role_slash(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
+    """Remove role from user using slash command"""
+    # Check permissions
+    user_roles = [role.id for role in interaction.user.roles]
+    has_access = any(role_id in user_roles for role_id in FULL_ADMIN_ROLE_IDS) or interaction.user.guild_permissions.administrator
+
+    if not has_access:
+        await interaction.response.send_message("❌ You don't have permission to remove roles!", ephemeral=True)
+        return
+
+    try:
+        await user.remove_roles(role)
+        await interaction.response.send_message(f"🗑️ **Role Removed!**\n👤 User: {user.mention}\n🎭 Removed: {role.name}")
+        await send_log(f"🗑️ **Role Removed**\nAdmin: {interaction.user.mention}\nUser: {user.mention}\nRemoved: {role.name}")
+    except Exception:
+        await interaction.response.send_message("❌ Could not remove role (check permissions).", ephemeral=True)
+
+# SLASH COMMAND - CHANGE NICKNAME
+@bot.tree.command(name="change_nickname", description="Change a user's nickname")
+async def change_nickname_slash(interaction: discord.Interaction, user: discord.Member, nickname: str):
+    """Change nickname using slash command"""
+    # Check permissions
+    user_roles = [role.id for role in interaction.user.roles]
+    has_access = any(role_id in user_roles for role_id in FULL_ADMIN_ROLE_IDS) or interaction.user.guild_permissions.administrator
+
+    if not has_access:
+        await interaction.response.send_message("❌ You don't have permission to change nicknames!", ephemeral=True)
+        return
+
+    try:
+        await user.edit(nick=nickname)
+        await interaction.response.send_message(f"✏️ Nickname changed for {user.mention} → **{nickname}**")
+        await send_log(f"✏️ **Nickname Changed**\nAdmin: {interaction.user.mention}\nUser: {user.mention}\nNew Nickname: **{nickname}**")
+    except Exception:
+        await interaction.response.send_message("❌ I don't have permission to change that nickname.", ephemeral=True)
 
 # ============================================================
-#                    TICKET SYSTEM
+#                    UTILITY SLASH COMMANDS
+# ============================================================
+
+# SLASH COMMAND - TIMER
+@bot.tree.command(name="timer", description="Start a timer")
+async def timer_slash(interaction: discord.Interaction, duration: str, message: str = None):
+    """Start a timer using slash command"""
+    seconds = parse_duration_to_seconds(duration)
+    if seconds is None:
+        await interaction.response.send_message("❌ Invalid duration format. Use: 30s, 10m, 2h, 1d", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"⏱️ Timer started for **{duration}** — I'll remind you when it's done, {interaction.user.mention}.")
+
+    async def run_timer():
+        try:
+            await asyncio.sleep(seconds)
+            if message:
+                await interaction.channel.send(f"⏰ **Timer finished** ({duration}) — {interaction.user.mention}\n{message}")
+            else:
+                await interaction.channel.send(f"⏰ **Timer finished** ({duration}) — {interaction.user.mention}")
+        except asyncio.CancelledError:
+            pass
+        finally:
+            active_timers.pop(interaction.user.id, None)
+
+    task = bot.loop.create_task(run_timer())
+    active_timers[interaction.user.id] = task
+
+# SLASH COMMAND - END TIMER
+@bot.tree.command(name="end_timer", description="Stop your active timer")
+async def end_timer_slash(interaction: discord.Interaction):
+    """End timer using slash command"""
+    user_id = interaction.user.id
+    task = active_timers.get(user_id)
+    if task and not task.done():
+        task.cancel()
+        await interaction.response.send_message(f"⏹️ Timer stopped, {interaction.user.mention}")
+        del active_timers[user_id]
+    else:
+        await interaction.response.send_message("❌ You don't have an active timer.", ephemeral=True)
+
+# SLASH COMMAND - AFK
+@bot.tree.command(name="afk", description="Set yourself as AFK")
+async def afk_slash(interaction: discord.Interaction, reason: str = "AFK"):
+    """Set AFK using slash command"""
+    afk_users[interaction.user.id] = {
+        "since": datetime.now(timezone.utc),
+        "reason": reason,
+        "channel": interaction.channel.id,
+        "pinged_by": []
+    }
+    await interaction.response.send_message(f"💤 {interaction.user.mention} is now AFK: {reason}")
+
+# SLASH COMMAND - HELP
+@bot.tree.command(name="help", description="Show all available commands")
+async def help_slash(interaction: discord.Interaction):
+    """Show help using slash command"""
+    embed = discord.Embed(title="✨ BOT COMMANDS PANEL", description="All available slash commands with role permissions", color=0x2F3136)
+
+    divider = "───────────────────────────────"
+
+    # Giveaway Commands
+    embed.add_field(name=f"{divider}\n🎁 GIVEAWAY COMMANDS\n{divider}", value="\u200b", inline=False)
+    embed.add_field(name="/giveaway_create", value="Create a new giveaway\n`prize`, `duration`, `winners`, `host`\n👑 Full Admins + 🎉 Giveaway Role", inline=True)
+    embed.add_field(name="/giveaway_end", value="End a giveaway early\n`giveaway_id`\n👑 Full Admins + 🎉 Giveaway Role", inline=True)
+    embed.add_field(name="/giveaway_list", value="List all active giveaways\n👥 Everyone", inline=True)
+    embed.add_field(name="/giveaway_reroll", value="Reroll winners\n`giveaway_id`, `winners`\n👑 Full Admins + 🎉 Giveaway Role", inline=True)
+
+    # Moderation Commands
+    embed.add_field(name=f"{divider}\n🔐 MODERATION COMMANDS\n{divider}", value="\u200b", inline=False)
+    embed.add_field(name="/timeout", value="Timeout a user\n`user`, `duration`, `reason`\n👑 Full Admins Only", inline=True)
+    embed.add_field(name="/ban", value="Ban a user\n`user`, `reason`\n👑 Full Admins Only", inline=True)
+    embed.add_field(name="/kick", value="Kick a user\n`user`, `reason`\n👑 Full Admins Only", inline=True)
+    embed.add_field(name="/give_role", value="Give role to user\n`user`, `role`\n👑 Full Admins Only", inline=True)
+    embed.add_field(name="/remove_role", value="Remove role from user\n`user`, `role`\n👑 Full Admins Only", inline=True)
+    embed.add_field(name="/change_nickname", value="Change nickname\n`user`, `nickname`\n👑 Full Admins Only", inline=True)
+
+    # Utility Commands
+    embed.add_field(name=f"{divider}\n⚙️ UTILITY COMMANDS\n{divider}", value="\u200b", inline=False)
+    embed.add_field(name="/timer", value="Start a timer\n`duration`, `message`\n👥 Everyone", inline=True)
+    embed.add_field(name="/end_timer", value="Stop your timer\n👥 Everyone", inline=True)
+    embed.add_field(name="/afk", value="Set yourself as AFK\n`reason`\n👥 Everyone", inline=True)
+    embed.add_field(name="/help", value="Show this help menu\n👥 Everyone", inline=True)
+
+    # Ticket Commands
+    embed.add_field(name=f"{divider}\n🎫 TICKET COMMANDS\n{divider}", value="\u200b", inline=False)
+    embed.add_field(name="/ticket_setup", value="Setup ticket system\n`channel`\n👑 Full Admins + 🎫 Ticket Admin", inline=True)
+    embed.add_field(name="/ticket_close", value="Close current ticket\n👑 Full Admins + 🎫 Ticket Admin", inline=True)
+
+    # Role Legend
+    embed.add_field(name=f"{divider}\n🔑 ROLE PERMISSIONS\n{divider}", value="\u200b", inline=False)
+    embed.add_field(name="👑 Full Admins", value="Can use ALL commands", inline=True)
+    embed.add_field(name="🎫 Ticket Admin", value="Can only use ticket commands", inline=True)
+    embed.add_field(name="🎉 Giveaway Role", value="Can only use giveaway commands", inline=True)
+
+    embed.set_footer(text="💡 Use slash commands for better experience!")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ============================================================
+#                    TICKET SYSTEM SLASH COMMANDS
+# ============================================================
+
+# SLASH COMMAND - TICKET SETUP
+@bot.tree.command(name="ticket_setup", description="Setup the ticket system in a channel")
+async def ticket_setup_slash(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    """Setup ticket system using slash command"""
+    # Check permissions
+    user_roles = [role.id for role in interaction.user.roles]
+    has_access = any(role_id in user_roles for role_id in TICKET_ADMIN_ROLE_IDS) or interaction.user.guild_permissions.administrator
+
+    if not has_access:
+        await interaction.response.send_message("❌ You don't have permission to setup tickets!", ephemeral=True)
+        return
+
+    target_channel = channel or interaction.channel
+    ticket_system = bot.get_cog('TicketSystem')
+    if not ticket_system:
+        ticket_system = TicketSystem(bot)
+        await bot.add_cog(ticket_system)
+
+    await ticket_system.create_ticket_panel(target_channel.id)
+    await interaction.response.send_message(f"✅ Ticket panel created/updated in {target_channel.mention}", ephemeral=True)
+
+# SLASH COMMAND - TICKET CLOSE
+@bot.tree.command(name="ticket_close", description="Close the current ticket")
+async def ticket_close_slash(interaction: discord.Interaction):
+    """Close ticket using slash command"""
+    # Check permissions
+    user_roles = [role.id for role in interaction.user.roles]
+    has_access = any(role_id in user_roles for role_id in TICKET_ADMIN_ROLE_IDS) or interaction.user.guild_permissions.administrator
+
+    if not has_access:
+        await interaction.response.send_message("❌ You don't have permission to close tickets!", ephemeral=True)
+        return
+
+    ticket_system = bot.get_cog('TicketSystem')
+    if ticket_system:
+        await ticket_system.close_ticket(interaction, interaction.channel.id)
+    else:
+        await interaction.response.send_message("❌ Ticket system not loaded.", ephemeral=True)
+
+# ============================================================
+#                    TICKET SYSTEM (UPDATED)
 # ============================================================
 TICKET_CATEGORY_NAME = "tickets"
-SUPPORT_ROLE_NAMES = ["Owner", "moderator", "support"]
+# Updated support roles to include the specific role IDs
+SUPPORT_ROLE_IDS = FULL_ADMIN_ROLE_IDS + [1420001481322401893]  # Full admins + ticket admin
+
 TICKET_WELCOME_MESSAGES = {
     "support": "👋 **Welcome to Support Ticket!**\n\nPlease describe your issue in detail and our support team will assist you shortly.",
     "invite": "🎁 **Welcome to Invite Rewards!**\n\nPlease provide your invite details and we'll process your rewards.",
     "giveaway": "🎉 **Welcome to Giveaway Claim!**\n\nPlease provide the giveaway details and proof of winning."
 }
-
 
 class TicketView(discord.ui.View):
     def __init__(self):
@@ -609,18 +756,24 @@ class TicketView(discord.ui.View):
         if ticket_system:
             await ticket_system.create_ticket(interaction, "giveaway", "🎉 Giveaway Claim")
 
-
 class CloseTicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.red, custom_id="close_ticket")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Check if user has ticket admin access
+        user_roles = [role.id for role in interaction.user.roles]
+        has_access = any(role_id in user_roles for role_id in SUPPORT_ROLE_IDS) or interaction.user.guild_permissions.administrator
+
+        if not has_access:
+            await interaction.response.send_message("❌ You don't have permission to close tickets.", ephemeral=True)
+            return
+
         await interaction.response.defer()
         ticket_system = bot.get_cog('TicketSystem')
         if ticket_system:
             await ticket_system.close_ticket(interaction)
-
 
 class TicketSystem(commands.Cog):
     def __init__(self, bot):
@@ -657,9 +810,11 @@ class TicketSystem(commands.Cog):
         view = TicketView()
 
         if existing_message:
+            # Update existing message silently (no new message)
             await existing_message.edit(embed=embed, view=view)
             return existing_message
         else:
+            # Send new message only if no existing panel found
             message = await channel.send(embed=embed, view=view)
             return message
 
@@ -671,8 +826,7 @@ class TicketSystem(commands.Cog):
             if data['user_id'] == user.id and not data['closed']:
                 channel = guild.get_channel(channel_id)
                 if channel:
-                    await interaction.followup.send(f"You already have an open ticket: {channel.mention}",
-                                                    ephemeral=True)
+                    await interaction.followup.send(f"You already have an open ticket: {channel.mention}", ephemeral=True)
                     return
 
         category = discord.utils.get(guild.categories, name=TICKET_CATEGORY_NAME)
@@ -690,11 +844,11 @@ class TicketSystem(commands.Cog):
             guild.me: discord.PermissionOverwrite(view_channel=True, manage_channels=True)
         }
 
-        for role_name in SUPPORT_ROLE_NAMES:
-            role = discord.utils.get(guild.roles, name=role_name)
+        # Add support role IDs instead of role names
+        for role_id in SUPPORT_ROLE_IDS:
+            role = guild.get_role(role_id)
             if role:
-                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True,
-                                                               manage_messages=True)
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True)
 
         ticket_channel = await category.create_text_channel(
             name=channel_name,
@@ -805,14 +959,11 @@ class TicketSystem(commands.Cog):
         if channel.id in self.ticket_data:
             del self.ticket_data[channel.id]
 
-
+# ORIGINAL TICKET COMMANDS (with updated permissions)
 @bot.command(name='ticketsetup')
+@has_ticket_admin_access()
 async def ticketsetup(ctx, channel: discord.TextChannel = None):
     """Setup the ticket system in a channel"""
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ You need administrator permissions to setup tickets.")
-        return
-
     target_channel = channel or ctx.channel
     ticket_system = bot.get_cog('TicketSystem')
     if not ticket_system:
@@ -822,8 +973,8 @@ async def ticketsetup(ctx, channel: discord.TextChannel = None):
     await ticket_system.create_ticket_panel(target_channel.id)
     await ctx.send(f"✅ Ticket panel created/updated in {target_channel.mention}")
 
-
 @bot.command(name='ticketclose')
+@has_ticket_admin_access()
 async def ticketclose(ctx):
     """Close the current ticket (for staff)"""
     ticket_system = bot.get_cog('TicketSystem')
@@ -832,14 +983,10 @@ async def ticketclose(ctx):
     else:
         await ctx.send("❌ Ticket system not loaded.")
 
-
 @bot.command(name='ticketmessage')
+@has_ticket_admin_access()
 async def ticketmessage(ctx, ticket_type: str, *, message: str):
     """Customize ticket welcome messages"""
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ You need administrator permissions to customize messages.")
-        return
-
     if ticket_type not in ["support", "invite", "giveaway"]:
         await ctx.send("❌ Invalid ticket type. Use: support, invite, or giveaway")
         return
@@ -847,15 +994,13 @@ async def ticketmessage(ctx, ticket_type: str, *, message: str):
     TICKET_WELCOME_MESSAGES[ticket_type] = message
     await ctx.send(f"✅ {ticket_type.title()} ticket message updated!")
 
-
 # ============================================================
-#                    OTHER COMMANDS
+#                    OTHER COMMANDS (KEEP EXISTING)
 # ============================================================
 
 # Active timers and AFK dictionaries
 active_timers = {}
 afk_users = {}
-
 
 @bot.event
 async def on_message(message):
@@ -908,225 +1053,24 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-
-@bot.command(name="help")
-async def help(ctx):
-    await ctx.message.delete()
-    embed = discord.Embed(title="✨ MANAGEMENT PANEL", description="A quick reference for admin commands.",
-                          color=0x2F3136)
-    divider = "───────────────────────────────"
-    embed.add_field(name=f"{divider}\n🔐 ADMIN COMMANDS\n{divider}", value="\u200b", inline=False)
-    embed.add_field(name="💰 ,,payout <text>",
-                    value="Sends a payout message. Attach image in same message or reply to the bot's prompt with an image.",
-                    inline=False)
-    embed.add_field(name="🌐 ,,ps vru", value="Send vru's private server link.", inline=False)
-    embed.add_field(name="🎭 ,,giverole @user @role1 @role2 ...",
-                    value="Give mentioned roles to a user. Roles must be mentioned.", inline=False)
-    embed.add_field(name="🗑️ ,,removerole @user @role1 @role2 ...", value="Remove mentioned roles from a user.",
-                    inline=False)
-    embed.add_field(name="✏️ ,,changenick @user NewNickname", value="Change someone's nickname (including bots).",
-                    inline=False)
-    embed.add_field(name="🔨 ,,ban @user [reason]", value="Ban a user from the server.", inline=False)
-    embed.add_field(name="⛔ ,,kick @user [reason]", value="Kick a user from the server.", inline=False)
-    embed.add_field(name="⏳ ,,timeout @user <duration> [reason]",
-                    value="Apply Discord moderation timeout (duration format: 30s, 10m, 2h, 1d).", inline=False)
-    embed.add_field(name="⏱️ ,,timer <duration> [message]",
-                    value="Start a normal timer (not Discord timeout). When it ends, bot will post the message and ping the requester.",
-                    inline=False)
-    embed.add_field(name="⏹️ ,,endtimer", value="Stops your active timer early.", inline=False)
-    embed.add_field(name="💤 ,,afk <reason>", value="Set yourself as AFK with an optional reason.", inline=False)
-    embed.add_field(name="🎁 ,,gwcreate <prize> <time> <winners> host(<to change the host>) ", value="Make a giveaway.",
-                    inline=False)
-    embed.add_field(name="🎁 ,,gwreroll <giveawayid> ", value="Reroll a Giveaway / To Change the Winner", inline=False)
-    embed.set_footer(text="All commands listed above require Administrator.")
-    await ctx.send(embed=embed)
-
-
-@bot.command(name="timer")
-async def timer(ctx, duration: str, *, message: str = None):
-    await ctx.message.delete()
-    seconds = parse_duration_to_seconds(duration)
-    if seconds is None:
-        return await ctx.send("❌ Invalid duration format. Use: 30s, 10m, 2h, 1d")
-
-    await ctx.send(f"⏱️ Timer started for **{duration}** — I'll remind you when it's done, {ctx.author.mention}.")
-
-    async def run_timer():
-        try:
-            await asyncio.sleep(seconds)
-            if message:
-                await ctx.send(f"⏰ **Timer finished** ({duration}) — {ctx.author.mention}\n{message}")
-            else:
-                await ctx.send(f"⏰ **Timer finished** ({duration}) — {ctx.author.mention}")
-        except asyncio.CancelledError:
-            pass
-        finally:
-            active_timers.pop(ctx.author.id, None)
-
-    task = bot.loop.create_task(run_timer())
-    active_timers[ctx.author.id] = task
-
-
-@bot.command(name="endtimer")
-async def endtimer(ctx):
-    await ctx.message.delete()
-    user_id = ctx.author.id
-    task = active_timers.get(user_id)
-    if task and not task.done():
-        task.cancel()
-        await ctx.send(f"⏹️ Timer stopped, {ctx.author.mention}")
-        del active_timers[user_id]
-    else:
-        await ctx.send("❌ You don't have an active timer.")
-
-
-@bot.command(name="giverole")
-@commands.has_permissions(administrator=True)
-async def giverole(ctx):
-    await ctx.message.delete()
-    user_mentions = ctx.message.mentions
-    role_mentions = ctx.message.role_mentions
-
-    if len(user_mentions) < 1 or len(role_mentions) < 1:
-        return await ctx.send(
-            "❌ **Incorrect usage!**\nCorrect format:\n`,,giverole @user @role1 @role2 ...`\nMake sure you mention roles (use @role).")
-
-    target_user = user_mentions[0]
-    roles_added = []
-
-    for role in role_mentions:
-        try:
-            await target_user.add_roles(role)
-            roles_added.append(role.name)
-        except Exception:
-            pass
-
-    if not roles_added:
-        return await ctx.send("⚠️ No roles could be added (check bot permissions and role hierarchy).")
-
-    await ctx.send(f"✅ **Roles Added!**\n👤 User: {target_user.mention}\n🎭 Roles: {', '.join(roles_added)}")
-    await send_log(
-        f"🛠️ **Roles Added**\nAdmin: {ctx.author.mention}\nUser: {target_user.mention}\nRoles: {', '.join(roles_added)}")
-
-
-@bot.command(name="removerole")
-@commands.has_permissions(administrator=True)
-async def removerole(ctx):
-    await ctx.message.delete()
-    user_mentions = ctx.message.mentions
-    role_mentions = ctx.message.role_mentions
-
-    if len(user_mentions) < 1 or len(role_mentions) < 1:
-        return await ctx.send("❌ **Incorrect usage!**\nCorrect format:\n`,,removerole @user @role1 @role2 ...`")
-
-    target_user = user_mentions[0]
-    roles_removed = []
-
-    for role in role_mentions:
-        try:
-            await target_user.remove_roles(role)
-            roles_removed.append(role.name)
-        except Exception:
-            pass
-
-    if not roles_removed:
-        return await ctx.send("⚠️ None of the roles could be removed (check permissions).")
-
-    await ctx.send(f"🗑️ **Roles Removed!**\n👤 User: {target_user.mention}\n🎭 Removed: {', '.join(roles_removed)}")
-    await send_log(
-        f"🗑️ **Roles Removed**\nAdmin: {ctx.author.mention}\nUser: {target_user.mention}\nRemoved: {', '.join(roles_removed)}")
-
-
-@bot.command(name="changenick")
-@commands.has_permissions(administrator=True)
-async def changenick(ctx, user: discord.Member, *, newnick=None):
-    await ctx.message.delete()
-    if newnick is None:
-        return await ctx.send("❌ Example:\n`,,changenick @user NewNickname`")
-
+# Add manual sync command for debugging
+@bot.command(name='sync')
+@has_full_admin_access()
+async def sync_commands(ctx):
+    """Manually sync slash commands"""
     try:
-        await user.edit(nick=newnick)
-        await ctx.send(f"✏️ Nickname changed for {user.mention} → **{newnick}**")
-        await send_log(
-            f"✏️ **Nickname Changed**\nAdmin: {ctx.author.mention}\nUser: {user.mention}\nNew Nickname: **{newnick}**")
-    except Exception:
-        await ctx.send("❌ I don't have permission to change that nickname.")
-
-
-@bot.command(name="ban")
-@commands.has_permissions(administrator=True)
-async def ban(ctx, user: discord.Member, *, reason: str = None):
-    await ctx.message.delete()
-    try:
-        await ctx.guild.ban(user, reason=reason)
-        await ctx.send(f"🔨 Banned {user.mention}.")
-        await send_log(f"🔨 **Banned** {user.mention} by {ctx.author.mention} — Reason: {reason}")
+        synced = await bot.tree.sync()
+        await ctx.send(f"✅ Successfully synced {len(synced)} slash command(s)")
+        for command in synced:
+            await ctx.send(f"  - /{command.name}")
     except Exception as e:
-        await ctx.send("❌ Could not ban that member (missing permissions / role hierarchy).")
-        print(f"Ban error: {e}")
-
-
-@bot.command(name="kick")
-@commands.has_permissions(administrator=True)
-async def kick(ctx, user: discord.Member, *, reason: str = None):
-    await ctx.message.delete()
-    try:
-        await ctx.guild.kick(user, reason=reason)
-        await ctx.send(f"⛔ Kicked {user.mention}.")
-        await send_log(f"⛔ **Kicked** {user.mention} by {ctx.author.mention} — Reason: {reason}")
-    except Exception as e:
-        await ctx.send("❌ Could not kick that member (missing permissions / role hierarchy).")
-        print(f"Kick error: {e}")
-
-
-@bot.command(name="timeout")
-@commands.has_permissions(administrator=True)
-async def timeout(ctx, user: discord.Member, duration: str, *, reason: str = None):
-    await ctx.message.delete()
-    seconds = parse_duration_to_seconds(duration)
-    if seconds is None:
-        return await ctx.send("❌ Invalid duration format. Use examples: 30s, 10m, 2h, 1d")
-
-    until = datetime.now(timezone.utc) + timedelta(seconds=seconds)
-
-    try:
-        await user.edit(timed_out_until=until)
-        await ctx.send(f"⏳ {user.mention} timed out for {duration}.")
-        await send_log(f"⏳ **Timeout** {user.mention} by {ctx.author.mention} for {duration} — Reason: {reason}")
-    except Exception as e:
-        await ctx.send("❌ Could not apply timeout (bot missing permission or role hierarchy).")
-        print(f"Timeout error: {e}")
-
-
-@bot.command(name="afk")
-async def afk(ctx, *, reason: str = "AFK"):
-    await ctx.message.delete()
-    afk_users[ctx.author.id] = {
-        "since": datetime.now(timezone.utc),
-        "reason": reason,
-        "channel": ctx.channel.id,
-        "pinged_by": []
-    }
-    await ctx.send(f"💤 {ctx.author.mention} is now AFK: {reason}")
-
-
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound):
-        await ctx.send("❌ Invalid command")
-
+        await ctx.send(f"❌ Failed to sync commands: {e}")
 
 # Add the cog when bot starts
 async def setup_hook():
     await bot.add_cog(TicketSystem(bot))
 
-
 bot.setup_hook = setup_hook
 
-# Start the web server
-keep_alive()
-
-# ⚠️ IMPORTANT: Use environment variable for token!
-
+# Run the bot
 bot.run(TOKEN)
-
